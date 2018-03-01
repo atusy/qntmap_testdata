@@ -1,0 +1,311 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# set seeds
+
+```{r}
+set.seed(123)
+seeds <- sample.int(2147483647, 10)
+
+```
+
+
+# dummy phases
+
+```{r}
+N <- 5 # number of phases
+P <- paste0('P', 1:N) # name of phases
+C <- 5 # number of components
+E <- LETTERS[1:C] # name of elements
+
+
+# Chemical compositions
+set.seed(seeds[1])
+W <- runif(N * C) %>>%
+  matrix(nrow = N, ncol = C, dimnames = list(P, E)) %>>%
+  `/`(rowSums(.)) %>>%
+  `*`(100) %>>%
+  return
+
+# Modal compositions
+set.seed(seeds[2])
+M <- runif(N) %>>%
+  `/`(sum(.))
+```
+
+# dummy machine conditions
+
+```{r}
+sensitivity <- 100
+```
+
+
+# Create required directories
+
+```{r dir.create}
+c('.map', '.map/1', '.qnt', '.qnt/.cnd') %>>%
+  lapply(dir.create, showWarnings = FALSE) %>>%
+  invisible()
+```
+
+# Create mapping data (.map directory)
+
+## 0.cnd
+
+```{r}
+x_start <- 0 # mm
+y_start <- 0 # mm
+x_num <- 100 # number of pixels in x-axis
+y_num <- 100 # number of pixels in y-axis
+xy_num <- x_num * y_num
+x_step <- 1000 # um
+y_step <- 1000 # um
+dwell <- 100 # msec
+beam_map <- 1e-7 # A
+
+data.frame(
+  val = c(
+    x_start,
+    y_start,
+    x_num,
+    y_num,
+    x_step,
+    y_step,
+    dwell,
+    beam_map
+  ),
+  var = c(
+    'Measurement Start Position X [mm]', 
+    'Measurement Start Position Y [mm]', 
+    'X-axis Step Number [1~1024]', 
+    'Y-axis Step Number [1~1024]',
+    'X Step Size [um], or Beam Dots Width',
+    'Y Step Size [um], or Beam Dots Width',
+    'Dwell Time [msec]',
+    'Probe Current Avg, Before After [A]'
+  ),
+  stringsAsFactors = FALSE
+) %>>%
+  fwrite('.map/1/0.cnd', sep = ' ', quote = FALSE)
+
+```
+
+## Modal map
+
+```{r}
+set.seed(seeds[3])
+map_P <- sample.int(N, xy_num, replace = TRUE, prob = M)
+
+ggplot(
+  data.frame(
+    expand.grid(
+      x = x_num:1,
+      y = y_num:1
+    ),
+    Phases = P[map_P]
+  )
+) +
+  geom_raster(aes(x = x, y = y, fill = Phases)) +
+  coord_fixed() +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0))
+```
+
+## X-ray map (*_map.txt)
+
+```{r}
+set.seed(seeds[4])
+
+rpois(xy_num * C, c(W[map_P, ]) * sensitivity * dwell * 1e-3 * beam_map * 1e+6) %>>% 
+  matrix(nrow = xy_num, ncol = C) %>>% 
+  as.data.frame %>>% 
+  lapply(matrix, nrow = y_num, ncol = x_num) %>>% 
+  lapply(as.data.table) %>>% 
+  map2(paste0('.map/1/', 1:length(.), '_map.txt'), fwrite, sep = ' ', col.names = FALSE) %>>%
+  invisible()
+
+```
+
+
+## .pm files
+
+```{r}
+invisible(file.create(paste0('.map/1/', 1:C, '.', E, '.pm'), showWarnings = FALSE))
+```
+
+
+# Create quantification data (.qnt directory)
+
+## Settings
+
+elemw.cnd
+
+```{r}
+beam_qnt <- 1e-8 # A
+pk_t <- 10 # sec
+bg_t <- 5 # sec
+bgp_pos <- 1
+bgm_pos <- 1
+
+
+list(
+  val = c(bgp_pos, bgm_pos, pk_t, bg_t),
+  var = c('Back +[mm]', 'Back -[mm]', 'Peak Meas. Time [sec]', 'Back Meas. Time [sec]')
+) %>>%
+  lapply(rep, C) %>>%
+  as.data.frame %>>%
+  fwrite('.qnt/.cnd/elemw.cnd', sep = ' ', col.names = FALSE, quote = FALSE)
+
+
+```
+
+## Which pixels are quantified?
+
+```{r}
+
+set.seed(seeds[5])
+seeds2 <- sample.int(2147483647, N)
+table_phase <- c(table(map_P))
+size = ifelse(table_phase < 20, table_phase, 20)
+quantified_points <- lapply(
+    1:N,
+    function(i) {
+      set.seed(seeds2[i])
+      which(map_P == i)[sample.int(table_phase[i], size[i])]
+    }
+  ) %>>%
+  unlist(use.names = FALSE, recursive = FALSE)
+
+n <- length(quantified_points)
+id <- 1:n
+```
+
+## Mass concentrations
+
+wt.qnt
+
+```{r}
+
+W_qnt <- W[map_P[quantified_points], ]
+cbind(id, ncol(W_qnt), W_qnt, rowSums(W_qnt)) %>>%
+  as.data.frame %>>%
+  fwrite('.qnt/wt.qnt', sep = ' ', col.names = FALSE) %>>%
+  invisible
+```
+
+
+## X-ray intensities
+
+pkint.qnt, bgp.qnt, bgm.qnt, net.qnt
+
+```{r}
+n <- length(quantified_points)
+
+pk_cps_E <-  c(W_qnt) * sensitivity * beam_qnt * 1e+6
+
+set.seed(seeds[6])
+rpois(C * n * 3, rep(c(pk_t, bg_t / 100, bg_t / 100), each = C * n) * pk_cps_E) %>>%
+  matrix(nrow = 3, ncol = C * n, byrow = TRUE) %>>%
+  `/`(c(pk_t, bg_t, bg_t)) %>>%
+  t %>>%
+  as.data.frame %>>%
+  setNames(c('pkint', 'bgp', 'bgm')) %>>%
+  mutate(net = pkint - (bgp * bgp_pos + bgm * bgm_pos) / (bgp_pos + bgm_pos)) %>>%
+  `/`(beam_qnt * 1e+6) %>>%
+  lapply(matrix, nrow = n, ncol = C) %>>%
+  lapply(function(x) cbind(id, ncol(x), x, rowSums(x))) %>>%
+  lapply(as.data.frame) %>>%
+  setNames(paste0('.qnt/', names(.), '.qnt')) %>>%
+  map2(names(.), fwrite, sep = ' ', col.names = FALSE) %>>%
+  invisible()
+
+```
+
+## Elements
+
+elem.qnt and elint.qnt
+
+```{r}
+data.frame(
+  id,
+  length(E),
+  matrix(rep(E, each = n), nrow = n, ncol = C)
+) %>>%
+  fwrite('.qnt/elint.qnt', sep = ' ', col.names = FALSE) %>>%
+  invisible
+
+data.frame(
+  id,
+  length(E),
+  matrix(rep(E, each = n), nrow = n, ncol = C)
+) %>>%
+  fwrite('.qnt/elem.qnt', sep = ' ', col.names = FALSE) %>>%
+  invisible
+
+
+```
+
+
+## Stage
+
+stg.qnt
+
+```{r}
+data.frame(
+  id = id,
+  user = 'test',
+  sample = 'test',
+  id2 = id,
+  x = (quantified_points %/% y_num + 1) * x_step * 1e-3,
+  y = (quantified_points %% y_num + 1)  * y_step * 1e-3,
+  z = 1,
+  aux1 = 0,
+  aux2 = 0,
+  comment = paste0('P', map_P[quantified_points])
+) %>>%
+  fwrite('.qnt/stg.qnt', sep = ' ', col.names = FALSE) %>>%
+  invisible
+```
+
+
+## Measurement
+
+mes.qnt
+
+```{r}
+data.frame(
+  id = id,
+  a = 1,
+  beam_qnt
+) %>>%
+  fwrite('.qnt/mes.qnt', sep = ' ', col.names = FALSE) %>>%
+  invisible
+```
+
+
+# quantify
+
+```{r}
+library(qntmap)
+wd <- getwd()
+dir_map <- paste0(wd, '/.map/1')
+xmap <- qltmap_load(dir_map, renew = TRUE)
+qnt <- qnt_load(renew = TRUE)
+centers <- qltmap_cls_centers(qnt = qnt, qltmap = xmap, dir_map = dir_map)
+cls <- qltmap_cls_pois(centers, xmap, wd = dir_map)
+qntmap <- qntmap_quantify(
+  dir_map = dir_map,
+  qnt = qnt,
+  cluster = cls,
+  fine_phase = NULL #Specify phase whose grain size tend to be smaller than mapping probe diameter.
+)
+```
+
+```{r}
+W
+qntmap
+```
+
+

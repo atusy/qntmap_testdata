@@ -31,3 +31,12 @@ vignettes/*.pdf
 # Temporary files created by R markdown
 *.utf8.md
 *.knit.md
+.Rproj.user
+
+# files created by qntmap
+clustering/
+qntmap/
+qnt.RDS
+qltmap.RDS
+centers_initial0.csv
+
